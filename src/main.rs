@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Formatter};
 
+mod earley;
+
 const EPSILON: char = 'ε';
 const ALGO_START: char = '$';
 
