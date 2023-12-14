@@ -7,7 +7,7 @@ use std::sync::Arc;
 use debug_print::debug_println;
 use once_cell::sync::Lazy;
 
-use crate::{ALGO_START, EPSILON, Rule};
+use crate::{ALGO_START, EPSILON, Parser, Rule};
 
 static ENTRY_RULE: Lazy<Rule> = Lazy::new(|| Rule { A: ALGO_START, alpha: "S".to_string() });
 static EMPTY_HASH_SET: Lazy<HashSet<Situation>> = Lazy::new(|| HashSet::new());
@@ -98,7 +98,7 @@ impl D {
     }
 }
 
-struct EarleyAlgorithm {
+pub struct EarleyAlgorithm {
     grammar: Vec<Arc<Rule>>,
     /// lazy computed set of non-terminals that derive epsilon
     nullable_nonterminals: HashSet<char>,
@@ -201,10 +201,10 @@ impl EarleyAlgorithm {
         }
         drop(curr_d);
 
-        /// As can be seen from the arguments, we make `complete` dependent only on new rules of the form (B→γ•, k, j).
-        /// However, it is possible that for the current `word_ind` a rule (A→α•Bβ, i, j) will be created for which the
-        /// second argument of a form (B→γ•, j, j) has already been added. It's easy to see that in this case B must be
-        /// nullable. To cover this case, we create new situations (A→αB•β, i, j).
+        // As can be seen from the arguments, we make `complete` dependent only on new rules of the form (B→γ•, k, j).
+        // However, it is possible that for the current `word_ind` a rule (A→α•Bβ, i, j) will be created for which the
+        // second argument of a form (B→γ•, j, j) has already been added. It's easy to see that in this case B must be
+        // nullable. To cover this case, we create new situations (A→αB•β, i, j).
         let mut i = 0;
         while i < new_situations.len() {
             let situation = &new_situations[i];
@@ -272,37 +272,22 @@ impl EarleyAlgorithm {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use debug_print::debug_println;
+struct EarleyParser {
+    grammar: Vec<Rule>
+}
 
-    use crate::earley::EarleyAlgorithm;
-    use crate::parse_grammar;
+impl Parser for EarleyParser {
+    fn contains(&self, word: &str) -> bool {
+        let mut earley = EarleyAlgorithm::new(self.grammar.clone());
+        let res = earley.check_word(word.to_string());
 
-    #[test]
-    fn test() {
-        let cases = vec![
-            (vec!["S->aSbS", "S->bSaS", "S->ε"], "ababba", true),
-            (vec!["S->aSbS", "S->ε"], "aababb", true),
-            (vec!["S->aSbS", "S->ε"], "aabbba", false),
-            (vec!["S->aSbS", "S->ε"], "aaababbb", true),
-            (vec!["S->Tca", "S->b", "T->Sa", "T->c", "S->aUac", "S->a", "U->aS", "U->c"], "acacaca", true),
-            (vec!["S->Tca", "S->b", "T->Sa", "T->c", "S->aUac", "S->a", "U->aS", "U->c"], "ccbb", false),
-            (vec!["S->A", "A->B", "B->C", "C->D", "D->a"], "a", true),
-            (vec!["S->BBB", "B->A", "A->ε"], "", true),
-        ];
+        let stats = earley.get_situations_stats();
+        debug_println!("Stats: {} added, {} rejected", stats.0, stats.1);
 
-        for (i, case) in cases.iter().enumerate() {
-            let grammar = parse_grammar(&case.0);
-            debug_println!("\n\n\n====== Case {} ======", i + 1);
-            debug_println!("Grammar: {:?}\nWord: {}\nExpected result: {}", grammar, case.1, case.2);
-
-            let mut earley = EarleyAlgorithm::new(grammar);
-            let result = earley.check_word(case.1.to_string());
-            assert_eq!(result, case.2);
-
-            let stats = earley.get_situations_stats();
-            debug_println!("Stats: {} added, {} rejected", stats.0, stats.1);
-        }
+        res
     }
+}
+
+pub fn make_earley_parser(grammar: Vec<Rule>) -> Result<Box<dyn Parser>, String> {
+    Ok(Box::new(EarleyParser { grammar }))
 }
