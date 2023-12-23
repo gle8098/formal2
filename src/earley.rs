@@ -28,11 +28,7 @@ struct Situation {
 impl Situation {
     /// Returns term right after dot (may be epsilon)
     pub fn dot_term(&self) -> char {
-        if self.rule.alpha.len() <= self.dot_index {
-            EPSILON
-        } else {
-            self.rule.alpha.chars().nth(self.dot_index).unwrap()
-        }
+        self.rule.alpha.chars().nth(self.dot_index).unwrap_or(EPSILON)
     }
 }
 
@@ -43,13 +39,19 @@ impl Debug for Situation {
     }
 }
 
+/// Situation set at input position `j`
 struct D {
-    j: usize,
+    input_position: usize,
 
     /// all situations inside D_j with fast search by dot term
     situations: HashMap<char, HashSet<Situation>>,
 
+    /// D struct keeps track of recently added situations, and stores some information about them. Call `take_deltas()`
+    /// to get these deltas and reset them.
+
+    /// Set of all terms after dot in recently added situations
     delta_dot_terms: HashSet<char>,
+    /// All recently added situations, which have dot at the end of their rules
     delta_ended_sit: Vec<Situation>,
 
     stat_add_accepted: usize,
@@ -57,9 +59,9 @@ struct D {
 }
 
 impl D {
-    pub fn new(j: usize) -> Self {
+    pub fn new(input_position: usize) -> Self {
         D {
-            j,
+            input_position,
             situations: HashMap::new(),
             delta_dot_terms: HashSet::new(),
             delta_ended_sit: Vec::new(),
@@ -69,7 +71,7 @@ impl D {
     }
 
     pub fn add_situation(&mut self, situation: Situation) -> bool {
-        debug_println!("Add: {:?} ∈ D_{}", situation, self.j);
+        debug_println!("Add: {:?} ∈ D_{}", situation, self.input_position);
 
         let newly_inserted = self.situations.entry(situation.dot_term()).or_default()
             .insert(situation.clone());
@@ -98,6 +100,9 @@ impl D {
 
 struct EarleyAlgorithm {
     grammar: Vec<Arc<Rule>>,
+    /// lazy computed set of non-terminals that derive epsilon
+    nullable_nonterminals: HashSet<char>,
+    /// vector of situations set (index = input position in word)
     d_s: Vec<RefCell<D>>,
     word: String,
     word_ind: usize,
@@ -114,6 +119,7 @@ impl EarleyAlgorithm {
 
         EarleyAlgorithm {
             grammar: algo_grammar,
+            nullable_nonterminals: HashSet::new(),
             d_s: vec![],
             word: String::new(),
             word_ind: 0,
@@ -133,22 +139,37 @@ impl EarleyAlgorithm {
             .contains(&Situation { rule: self.entry_rule(), dot_index: 1, origin: 0 })
     }
 
+    fn update_nullable_nonterminals(&mut self, curr_delta_ended_sits: &Vec<Situation>) {
+        for situation in curr_delta_ended_sits {
+            // this is dot-ended situation
+            debug_assert_eq!(situation.dot_term(), EPSILON);
+
+            // ... and origin is the same with word index
+            if situation.origin == self.word_ind {
+                // => rule.A is nullable
+                self.nullable_nonterminals.insert(situation.rule.A);
+            }
+        }
+    }
+
+    /// Produces new situations by rule: `(A→α•uβ, i, j) + /self.word[j] == u/ ---> (A→αu•β, i, j + 1)`.
     fn scan(&mut self) {
         let next_char = self.word.chars().nth(self.word_ind).unwrap();
         let prev_d = self.d_s.get(self.word_ind).unwrap().borrow();
         let mut curr_d = self.d_s.get(self.word_ind + 1).unwrap().borrow_mut();
 
-        for sit in prev_d.get_by_dot_term(&next_char) {
+        for situation in prev_d.get_by_dot_term(&next_char) {
             curr_d.add_situation(Situation {
-                rule: sit.rule.clone(),
-                dot_index: sit.dot_index + 1,
-                origin: sit.origin,
+                rule: situation.rule.clone(),
+                dot_index: situation.dot_index + 1,
+                origin: situation.origin,
             });
         }
 
         self.word_ind += 1;
     }
 
+    /// Produces new situations by rule: `(A→α•Bβ, i, j) + /(B→γ) ∈ self.grammar/ ---> (B→•γ, j, j)`.
     fn predict(&mut self, curr_delta_dot_terms: &HashSet<char>) {
         let mut curr_d = self.curr_d();
 
@@ -163,13 +184,14 @@ impl EarleyAlgorithm {
         }
     }
 
+    /// Produces new situations by rule: `(A→α•Bβ, i, k) + (B→γ•, k, j) ---> (A→αB•β, i, j)`.
     fn complete(&mut self, curr_delta_ended_sits: &Vec<Situation>) {
         let curr_d = self.d_s.get(self.word_ind).unwrap().borrow();
         let mut new_situations = vec![];
 
-        for sit in curr_delta_ended_sits {
-            let origin_d = self.d_s.get(sit.origin).unwrap().borrow();
-            for origin_sit in &*origin_d.get_by_dot_term(&sit.rule.A) {
+        for situation in curr_delta_ended_sits {
+            let origin_d = self.d_s.get(situation.origin).unwrap().borrow();
+            for origin_sit in origin_d.get_by_dot_term(&situation.rule.A) {
                 new_situations.push(Situation {
                     rule: origin_sit.rule.clone(),
                     origin: origin_sit.origin,
@@ -177,8 +199,25 @@ impl EarleyAlgorithm {
                 });
             }
         }
-
         drop(curr_d);
+
+        /// As can be seen from the arguments, we make `complete` dependent only on new rules of the form (B→γ•, k, j).
+        /// However, it is possible that for the current `word_ind` a rule (A→α•Bβ, i, j) will be created for which the
+        /// second argument of a form (B→γ•, j, j) has already been added. It's easy to see that in this case B must be
+        /// nullable. To cover this case, we create new situations (A→αB•β, i, j).
+        let mut i = 0;
+        while i < new_situations.len() {
+            let situation = &new_situations[i];
+            if self.nullable_nonterminals.contains(&situation.dot_term()) {
+                let mut situation = situation.clone();
+                situation.dot_index += 1;
+                new_situations.push(situation);
+                // ... push the situation to the end of the vector to process it once again later
+                // (maybe it has a few nullable non-terminals in a row)
+            }
+            i += 1;
+        }
+
         let mut curr_d = self.curr_d();
         for situation in new_situations {
             curr_d.add_situation(situation);
@@ -207,6 +246,7 @@ impl EarleyAlgorithm {
                     break;
                 }
 
+                self.update_nullable_nonterminals(&curr_delta_ended_sits);
                 self.complete(&curr_delta_ended_sits);
                 self.predict(&curr_delta_dot_terms);
             }
@@ -248,6 +288,8 @@ mod tests {
             (vec!["S->aSbS", "S->ε"], "aaababbb", true),
             (vec!["S->Tca", "S->b", "T->Sa", "T->c", "S->aUac", "S->a", "U->aS", "U->c"], "acacaca", true),
             (vec!["S->Tca", "S->b", "T->Sa", "T->c", "S->aUac", "S->a", "U->aS", "U->c"], "ccbb", false),
+            (vec!["S->A", "A->B", "B->C", "C->D", "D->a"], "a", true),
+            (vec!["S->BBB", "B->A", "A->ε"], "", true),
         ];
 
         for (i, case) in cases.iter().enumerate() {
